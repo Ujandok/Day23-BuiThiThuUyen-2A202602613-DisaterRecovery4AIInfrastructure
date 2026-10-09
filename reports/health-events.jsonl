@@ -1,0 +1,5 @@
+{"ts": 1791519171.7898498, "event": "checker_start", "regions": ["a", "b"], "interval_s": 5.0, "timeout_s": 2.0, "threshold": 3, "detect_floor_s": 15.0}
+{"ts": 1791519182.1605017, "iso": "2026-10-09T04:13:02", "event": "state_change", "region": "b", "from": "HEALTHY", "to": "UNHEALTHY", "reason": "http_503:pool_state=warm,model_weights_missing,vector_db_empty(count=0)", "consecutive_fails": 3, "consecutive_ok": 0, "interval_s": 5.0, "timeout_s": 2.0, "threshold": 3}
+{"ts": 1791519203.4874673, "iso": "2026-10-09T04:13:23", "event": "state_change", "region": "a", "from": "HEALTHY", "to": "UNHEALTHY", "reason": "timeout>2.0s", "consecutive_fails": 3, "consecutive_ok": 0, "interval_s": 5.0, "timeout_s": 2.0, "threshold": 3}
+{"ts": 1791519224.8616967, "iso": "2026-10-09T04:13:44", "event": "state_change", "region": "b", "from": "UNHEALTHY", "to": "HEALTHY", "reason": "ready", "consecutive_fails": 0, "consecutive_ok": 3, "interval_s": 5.0, "timeout_s": 2.0, "threshold": 3}
+{"ts": 1791519272.621169, "event": "checker_stop", "final_state": {"a": "UNHEALTHY", "b": "HEALTHY"}, "last_reason": {"a": "timeout>2.0s", "b": "ready"}}

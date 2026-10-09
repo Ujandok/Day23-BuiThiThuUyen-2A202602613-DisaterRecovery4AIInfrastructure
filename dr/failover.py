@@ -34,14 +34,99 @@ URL = {"a": "http://127.0.0.1:8001", "b": "http://127.0.0.1:8002"}
 LOG = pathlib.Path("reports/failover-events.jsonl")
 
 
+ACTIVE = pathlib.Path("edge/active_region")
+
+
 def emit(**kw):
-    """TODO: append 1 dòng JSONL có ts + iso vào LOG, và print ra stdout."""
-    raise NotImplementedError
+    """Append 1 dòng JSONL có ts + iso vào LOG, và print ra stdout."""
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    rec = {"ts": time.time(), "iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()), **kw}
+    with LOG.open("a") as f:
+        f.write(json.dumps(rec) + "\n")
+    print("FAILOVER", json.dumps(rec))
+    return rec
+
+
+def _abort(t0: float, result: dict, step: str, why: str) -> dict:
+    emit(step=step, ok=False, aborted=True, error=why, note="ABORT -> KHONG cutover")
+    result.update(ok=False, aborted_at=step, error=why, elapsed_s=round(time.time() - t0, 2))
+    return result
 
 
 def failover(target: str, backend: str, wait: float) -> dict:
-    """TODO: 5 bước ở trên, đúng thứ tự."""
-    raise NotImplementedError
+    """5 bước ở trên, đúng thứ tự. Bước nào hỏng -> abort, edge/active_region giữ nguyên."""
+    t0 = time.time()
+    primary = "a" if target == "b" else "b"
+    result = {"ok": False, "target": target, "primary": primary, "backend": backend,
+              "steps": []}
+
+    # 1. verify_target: region phụ phải còn API để nhận state. Thiếu weights/vector là
+    #    bình thường (warm standby rỗng) — bước 2 sẽ lấp vào.
+    try:
+        before = httpx.get(f"{URL[target]}/v1/state", timeout=2.0).json()
+    except Exception as e:
+        return _abort(t0, result, "1_verify_target",
+                      f"region-{target} khong phan hoi /v1/state: {type(e).__name__}")
+    emit(step="1_verify_target", ok=True, target=target, pool_state=before.get("pool_state"),
+         weights=before.get("weights"), vector_count=before.get("count"))
+    result["steps"].append("1_verify_target")
+    result["target_state_before"] = before
+
+    # 2. restore_snapshot + đo RPO thật (primary có mà bản restore không có).
+    try:
+        meta = snapshot.get(target, backend)
+    except (Exception, SystemExit) as e:  # snapshot.get raise SystemExit khi chưa có put nào
+        return _abort(t0, result, "2_restore_snapshot", f"restore that bai: {e}")
+    r = snapshot.rpo(pathlib.Path(f"state/region-{primary}/vectors.sqlite"),
+                     pathlib.Path(f"state/region-{target}/vectors.sqlite"))
+    emit(step="2_restore_snapshot", ok=True, backend=backend,
+         snapshot_at=meta.get("snapshot_at"), rpo_seconds=r["rpo_seconds"],
+         docs_lost=r["docs_lost"], embed_model_version=meta.get("embed_model_version"),
+         primary_latest_doc_ts=r["primary_latest_doc_ts"],
+         restored_latest_doc_ts=r["restored_latest_doc_ts"])
+    result["steps"].append("2_restore_snapshot")
+    result.update(rpo_seconds=r["rpo_seconds"], docs_lost=r["docs_lost"],
+                  embed_model_version=meta.get("embed_model_version"))
+
+    # 3. scale_pool warm -> full. Warm-up của GPU pool bắt đầu tính từ đây.
+    pool = pathlib.Path(f"state/region-{target}/pool_state")
+    prev_pool = pool.read_text().strip() if pool.exists() else "cold"
+    pool.write_text("full")
+    emit(step="3_scale_pool", ok=True, target=target, pool_from=prev_pool, pool_to="full")
+    result["steps"].append("3_scale_pool")
+
+    # 4. wait_ready: poll /readyz tới 200. Timeout -> ABORT, KHÔNG cutover.
+    t_wait, last = time.time(), "chua_probe"
+    while True:
+        try:
+            resp = httpx.get(f"{URL[target]}/readyz", timeout=2.0)
+            if resp.status_code == 200:
+                break
+            last = ",".join(resp.json().get("reasons") or []) or f"http_{resp.status_code}"
+        except Exception as e:
+            last = type(e).__name__
+        if time.time() - t_wait >= wait:
+            return _abort(t0, result, "4_wait_ready",
+                          f"region-{target} chua ready sau {wait}s (last={last})")
+        time.sleep(0.5)
+    waited = round(time.time() - t_wait, 2)
+    emit(step="4_wait_ready", ok=True, target=target, waited_s=waited)
+    result["steps"].append("4_wait_ready")
+    result["waited_s"] = waited
+
+    # 5. dns_cutover: chỉ tới đây mới đổi "DNS record". Ghi không newline, không BOM.
+    prev_active = ACTIVE.read_text().strip() if ACTIVE.exists() else None
+    ACTIVE.parent.mkdir(parents=True, exist_ok=True)
+    ACTIVE.write_text(target, encoding="utf-8")
+    emit(step="5_dns_cutover", ok=True, active_from=prev_active, active_to=target)
+    result["steps"].append("5_dns_cutover")
+
+    try:
+        result["target_state_after"] = httpx.get(f"{URL[target]}/v1/state", timeout=2.0).json()
+    except Exception:
+        result["target_state_after"] = None
+    result.update(ok=True, elapsed_s=round(time.time() - t0, 2))
+    return result
 
 
 if __name__ == "__main__":
